@@ -20,7 +20,6 @@
 #define PROPAGATOR_H
 
 #include <Eigen/Eigen>
-#include <ros/ros.h>
 #include <vector>
 
 #include "cpi/CpiBase.h"

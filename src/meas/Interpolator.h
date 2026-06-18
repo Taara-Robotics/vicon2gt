@@ -21,7 +21,7 @@
 
 #include <Eigen/Eigen>
 #include <algorithm>
-#include <ros/ros.h>
+#include <set>
 #include <vector>
 
 #include "cpi/CpiV1.h"

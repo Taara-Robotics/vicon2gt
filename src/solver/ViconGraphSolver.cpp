@@ -18,11 +18,14 @@
  */
 #include "ViconGraphSolver.h"
 
-ViconGraphSolver::ViconGraphSolver(ros::NodeHandle &nh, std::shared_ptr<Propagator> propagator, std::shared_ptr<Interpolator> interpolator,
-                                   std::vector<double> timestamp_cameras) {
+#include <cmath>
+#include <iostream>
+#include <stdexcept>
+
+ViconGraphSolver::ViconGraphSolver(const Options &options, std::shared_ptr<Propagator> propagator,
+                                   std::shared_ptr<Interpolator> interpolator, std::vector<double> timestamp_cameras) {
 
   // save measurement data
-  this->nh = nh;
   this->propagator = propagator;
   this->interpolator = interpolator;
   this->timestamp_cameras = timestamp_cameras;
@@ -31,30 +34,11 @@ ViconGraphSolver::ViconGraphSolver(ros::NodeHandle &nh, std::shared_ptr<Propagat
   this->graph = new gtsam::NonlinearFactorGraph();
   this->config = std::make_shared<GtsamConfig>();
 
-  // Load gravity rotation into vicon frame
-  std::vector<double> R_GtoV;
-  std::vector<double> R_GtoV_default = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
-  nh.param<std::vector<double>>("R_GtoV", R_GtoV, R_GtoV_default);
-  init_R_GtoV << R_GtoV.at(0), R_GtoV.at(1), R_GtoV.at(2), R_GtoV.at(3), R_GtoV.at(4), R_GtoV.at(5), R_GtoV.at(6), R_GtoV.at(7),
-      R_GtoV.at(8);
-
-  // Load gravity magnitude
-  nh.param<double>("gravity_magnitude", gravity_magnitude, 9.81);
-
-  // Load transform between vicon body frame to the IMU
-  std::vector<double> R_BtoI;
-  std::vector<double> R_BtoI_default = {1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0};
-  nh.param<std::vector<double>>("R_BtoI", R_BtoI, R_BtoI_default);
-  init_R_BtoI << R_BtoI.at(0), R_BtoI.at(1), R_BtoI.at(2), R_BtoI.at(3), R_BtoI.at(4), R_BtoI.at(5), R_BtoI.at(6), R_BtoI.at(7),
-      R_BtoI.at(8);
-
-  std::vector<double> p_BinI;
-  std::vector<double> p_BinI_default = {0.0, 0.0, 0.0};
-  nh.param<std::vector<double>>("p_BinI", p_BinI, p_BinI_default);
-  init_p_BinI << p_BinI.at(0), p_BinI.at(1), p_BinI.at(2);
-
-  // Time offset between imu and vicon
-  nh.param<double>("toff_imu_to_vicon", init_toff_imu_to_vicon, 0.0);
+  init_R_GtoV = options.init_R_GtoV;
+  gravity_magnitude = options.gravity_magnitude;
+  init_R_BtoI = options.init_R_BtoI;
+  init_p_BinI = options.init_p_BinI;
+  init_toff_imu_to_vicon = options.init_toff_imu_to_vicon;
 
   // Debug print to console
   cout << "init_R_GtoV:" << endl << init_R_GtoV << endl;
@@ -67,53 +51,33 @@ ViconGraphSolver::ViconGraphSolver(ros::NodeHandle &nh, std::shared_ptr<Propagat
   // ================================================================================================
 
   // See if we should estimate time offset
-  nh.param<bool>("estimate_toff_vicon_to_imu", config->estimate_vicon_imu_toff, config->estimate_vicon_imu_toff);
-  nh.param<bool>("estimate_ori_vicon_to_imu", config->estimate_vicon_imu_ori, config->estimate_vicon_imu_ori);
-  nh.param<bool>("estimate_pos_vicon_to_imu", config->estimate_vicon_imu_pos, config->estimate_vicon_imu_pos);
+  *config = options.gtsam_config;
 
   // Number of times we relinearize
-  nh.param<int>("num_loop_relin", num_loop_relin, 0);
+  num_loop_relin = options.num_loop_relin;
 
   // Nice debug print
   cout << "estimate_toff_vicon_to_imu: " << (int)config->estimate_vicon_imu_toff << endl;
   cout << "estimate_ori_vicon_to_imu: " << (int)config->estimate_vicon_imu_ori << endl;
   cout << "estimate_pos_vicon_to_imu: " << (int)config->estimate_vicon_imu_pos << endl;
   cout << "num_loop_relin: " << num_loop_relin << endl;
-
-  // ================================================================================================
-  // ================================================================================================
-  // ================================================================================================
-
-  // Frequency we will publish the raw vicon poses at
-  nh.param<double>("freq_pub_raw_vicon", vicon_raw_pub_freq, 10.0);
-
-  // Setup our ROS publishers
-  pub_pathimu = nh.advertise<nav_msgs::Path>("/vicon2gt/optimized", 2);
-  pub_pathvicon = nh.advertise<nav_msgs::Path>("/vicon2gt/vicon", 2);
-  pub_vicon_raw = nh.advertise<geometry_msgs::PoseArray>("/vicon2gt/vicon_raw", 2);
 }
 
 void ViconGraphSolver::build_and_solve() {
 
   // Ensure we have enough measurements
   if (timestamp_cameras.empty()) {
-    ROS_ERROR("[VICON-GRAPH]: Camera timestamp vector empty!!!!");
-    ROS_ERROR("[VICON-GRAPH]: Make sure your camera topic is correct...");
-    ROS_ERROR("%s on line %d", __FILE__, __LINE__);
-    std::exit(EXIT_FAILURE);
+    throw std::runtime_error("[VICON-GRAPH]: camera timestamp vector is empty");
   }
 
   // Ensure we have enough measurements after removing invalid
   if (interpolator->get_raw_poses().size() < 2) {
-    ROS_ERROR("[VICON-GRAPH]: Not enough vicon poses to optimize with...");
-    ROS_ERROR("[VICON-GRAPH]: Make sure your vicon topic is correct...");
-    ROS_ERROR("%s on line %d", __FILE__, __LINE__);
-    std::exit(EXIT_FAILURE);
+    throw std::runtime_error("[VICON-GRAPH]: not enough vicon poses to optimize with");
   }
 
   // Delete all camera measurements that occur before our IMU readings
   // Also delete ones before and after the first and last vicon measurements
-  ROS_INFO("cleaning camera timestamps");
+  cout << "cleaning camera timestamps" << endl;
   int ct_remove_imu = 0;
   int ct_remove_before = 0;
   int ct_remove_after = 0;
@@ -121,32 +85,25 @@ void ViconGraphSolver::build_and_solve() {
   double vicon_last_time_inI = interpolator->get_time_max() + init_toff_imu_to_vicon - 2 * TIME_OFFSET;
   auto it0 = timestamp_cameras.begin();
   while (it0 != timestamp_cameras.end()) {
-    if (!ros::ok())
-      break;
     if (!propagator->has_bounding_imu(*it0)) {
-      ROS_INFO_THROTTLE(0.05, "    - deleted cam time %.9f with no IMU [throttled]", *it0);
       it0 = timestamp_cameras.erase(it0);
       ct_remove_imu++;
     } else if ((*it0) < vicon_first_time_inI) {
-      ROS_INFO_THROTTLE(0.05, "    - deleted cam time %.9f before first vicon [throttled]", *it0);
       it0 = timestamp_cameras.erase(it0);
       ct_remove_before++;
     } else if ((*it0) > vicon_last_time_inI) {
-      ROS_INFO_THROTTLE(0.05, "    - deleted cam time %.9f after last vicon [throttled]", *it0);
       it0 = timestamp_cameras.erase(it0);
       ct_remove_after++;
     } else {
       it0++;
     }
   }
-  ROS_INFO("removed %d imu invalid, %d invalid before vicon, %d invalid after vicon", ct_remove_imu, ct_remove_before, ct_remove_after);
+  cout << "removed " << ct_remove_imu << " imu invalid, " << ct_remove_before << " invalid before vicon, " << ct_remove_after
+       << " invalid after vicon" << endl;
 
   // Ensure we have enough measurements after removing invalid
   if (timestamp_cameras.empty()) {
-    ROS_ERROR("[VICON-GRAPH]: All camera timestamps where out of the range of the IMU measurements.");
-    ROS_ERROR("[VICON-GRAPH]: Make sure your vicon and imu topics are correct...");
-    ROS_ERROR("%s on line %d", __FILE__, __LINE__);
-    std::exit(EXIT_FAILURE);
+    throw std::runtime_error("[VICON-GRAPH]: all camera timestamps were outside the IMU/Vicon overlap");
   }
 
   // Clear old states
@@ -172,9 +129,9 @@ void ViconGraphSolver::build_and_solve() {
     values = values_result;
 
     // Now print timing statistics
-    ROS_INFO("\u001b[34m[TIME]: %.4f to build\u001b[0m", (rT2 - rT1).total_microseconds() * 1e-6);
-    ROS_INFO("\u001b[34m[TIME]: %.4f to optimize\u001b[0m", (rT3 - rT2).total_microseconds() * 1e-6);
-    ROS_INFO("\u001b[34m[TIME]: %.4f total (loop %d)\u001b[0m", (rT3 - rT1).total_microseconds() * 1e-6, i);
+    printf("\033[34m[TIME]: %.4f to build\033[0m\n", (rT2 - rT1).total_microseconds() * 1e-6);
+    printf("\033[34m[TIME]: %.4f to optimize\033[0m\n", (rT3 - rT2).total_microseconds() * 1e-6);
+    printf("\033[34m[TIME]: %.4f total (loop %d)\033[0m\n", (rT3 - rT1).total_microseconds() * 1e-6, i);
 
     // Visualize this iteration
     visualize();
@@ -192,18 +149,22 @@ void ViconGraphSolver::build_and_solve() {
 }
 
 void ViconGraphSolver::write_to_file(std::string csvfilepath, std::string infofilepath) {
+  write_to_file(std::move(csvfilepath), std::move(infofilepath), ExportOptions{});
+}
+
+void ViconGraphSolver::write_to_file(std::string csvfilepath, std::string infofilepath, const ExportOptions &options) {
 
   // Debug info
-  ROS_INFO("saving states and info to file");
+  cout << "saving states and info to file" << endl;
 
   // If the file exists, then delete it
-  if (boost::filesystem::exists(csvfilepath)) {
+  if (options.overwrite_existing && boost::filesystem::exists(csvfilepath)) {
     boost::filesystem::remove(csvfilepath);
-    ROS_INFO("    - old state file found, deleted...");
+    cout << "    - old state file found, deleted..." << endl;
   }
-  if (boost::filesystem::exists(infofilepath)) {
+  if (options.overwrite_existing && boost::filesystem::exists(infofilepath)) {
     boost::filesystem::remove(infofilepath);
-    ROS_INFO("    - old info file found, deleted...");
+    cout << "    - old info file found, deleted..." << endl;
   }
   // Create the directory that we will open the file in
   boost::filesystem::path p1(csvfilepath);
@@ -247,112 +208,7 @@ void ViconGraphSolver::write_to_file(std::string csvfilepath, std::string infofi
   of_info.close();
 }
 
-void ViconGraphSolver::visualize() {
-
-  // Tell the user we are publishing
-  ROS_INFO("Publishing: %s", pub_pathimu.getTopic().c_str());
-  ROS_INFO("Publishing: %s", pub_pathvicon.getTopic().c_str());
-
-  // Append to our pose vector
-  std::vector<geometry_msgs::PoseStamped> poses_imu;
-  for (size_t i = 0; i < timestamp_cameras.size(); i++) {
-
-    // Get the optimized imu state
-    JPLNavState state = values_result.at<JPLNavState>(X(map_states[timestamp_cameras.at(i)]));
-
-    // Create the pose
-    geometry_msgs::PoseStamped posetemp;
-    posetemp.header.stamp = ros::Time(timestamp_cameras.at(i));
-    posetemp.header.frame_id = "vicon";
-    posetemp.pose.orientation.x = state.q()(0);
-    posetemp.pose.orientation.y = state.q()(1);
-    posetemp.pose.orientation.z = state.q()(2);
-    posetemp.pose.orientation.w = state.q()(3);
-    posetemp.pose.position.x = state.p()(0);
-    posetemp.pose.position.y = state.p()(1);
-    posetemp.pose.position.z = state.p()(2);
-    poses_imu.push_back(posetemp);
-  }
-
-  // Create our path (imu)
-  // NOTE: We downsample the number of poses as needed to prevent rviz crashes
-  // NOTE: https://github.com/ros-visualization/rviz/issues/1107
-  nav_msgs::Path arrIMU;
-  arrIMU.header.stamp = ros::Time::now();
-  arrIMU.header.frame_id = "vicon";
-  for (size_t i = 0; i < poses_imu.size(); i += std::floor(poses_imu.size() / 16384.0) + 1) {
-    arrIMU.poses.push_back(poses_imu.at(i));
-  }
-  pub_pathimu.publish(arrIMU);
-
-  // Get vicon marker body to imu calibration
-  Eigen::Matrix3d R_BtoI = quat_2_Rot(values_result.at<JPLQuaternion>(C(0)).q());
-  Eigen::Vector3d p_BinI = values_result.at<Vector3>(C(1));
-
-  // Append to our pose vector
-  std::vector<geometry_msgs::PoseStamped> poses_vicon;
-  for (size_t i = 0; i < timestamp_cameras.size(); i++) {
-
-    // Get the interpolated pose
-    Eigen::Vector4d q_VtoB;
-    Eigen::Vector3d p_BinV;
-    Eigen::Matrix<double, 6, 6> R_vicon;
-    double timestamp_inV = timestamp_cameras.at(i) - values.at<Vector1>(T(0))(0);
-    bool has_vicon = interpolator->get_pose(timestamp_inV, q_VtoB, p_BinV, R_vicon);
-    if (!has_vicon)
-      continue;
-
-    // Transform into the IMU frame
-    Eigen::Vector4d q_VtoI = quat_multiply(rot_2_quat(R_BtoI), q_VtoB);
-    Eigen::Vector3d p_IinV = p_BinV - quat_2_Rot(q_VtoI).transpose() * p_BinI;
-
-    // Create the pose
-    geometry_msgs::PoseStamped posetemp;
-    posetemp.header.stamp = ros::Time(timestamp_cameras.at(i));
-    posetemp.header.frame_id = "vicon";
-    posetemp.pose.orientation.x = q_VtoI(0);
-    posetemp.pose.orientation.y = q_VtoI(1);
-    posetemp.pose.orientation.z = q_VtoI(2);
-    posetemp.pose.orientation.w = q_VtoI(3);
-    posetemp.pose.position.x = p_IinV(0);
-    posetemp.pose.position.y = p_IinV(1);
-    posetemp.pose.position.z = p_IinV(2);
-    poses_vicon.push_back(posetemp);
-  }
-
-  // Create our path (vicon)
-  // NOTE: We downsample the number of poses as needed to prevent rviz crashes
-  // NOTE: https://github.com/ros-visualization/rviz/issues/1107
-  nav_msgs::Path arrVICON;
-  arrVICON.header.stamp = ros::Time::now();
-  arrVICON.header.frame_id = "vicon";
-  for (size_t i = 0; i < poses_vicon.size(); i += std::floor(poses_imu.size() / 16384.0) + 1) {
-    arrVICON.poses.push_back(poses_vicon.at(i));
-  }
-  pub_pathvicon.publish(arrVICON);
-
-  // Pose array of the raw VICON poses which we get on our vicon topic
-  // NOTE: might be a lot to visualize if high frequency vicon system...
-  double last_pub_time = -1;
-  geometry_msgs::PoseArray pose_arr;
-  pose_arr.header.stamp = ros::Time::now();
-  pose_arr.header.frame_id = "vicon";
-  for (const auto &pose_data : interpolator->get_raw_poses()) {
-    if (last_pub_time != -1 && (last_pub_time + 1.0 / vicon_raw_pub_freq) > pose_data.timestamp)
-      continue;
-    geometry_msgs::Pose pose;
-    pose.orientation.x = pose_data.q(0);
-    pose.orientation.y = pose_data.q(1);
-    pose.orientation.z = pose_data.q(2);
-    pose.orientation.w = pose_data.q(3);
-    pose.position.x = pose_data.p(0);
-    pose.position.y = pose_data.p(1);
-    pose.position.z = pose_data.p(2);
-    pose_arr.poses.push_back(pose);
-    last_pub_time = pose_data.timestamp;
-  }
-  pub_vicon_raw.publish(pose_arr);
-}
+void ViconGraphSolver::visualize() {}
 
 void ViconGraphSolver::get_imu_poses(std::vector<double> &times, std::vector<Eigen::Matrix<double, 10, 1>> &poses) {
 
@@ -393,7 +249,7 @@ void ViconGraphSolver::build_problem(bool init_states) {
   rT1 = boost::posix_time::microsec_clock::local_time();
 
   // Clear the old factors
-  ROS_INFO("[BUILD]: building the graph (might take a while)");
+  cout << "[BUILD]: building the graph (might take a while)" << endl;
   graph->erase(graph->begin(), graph->end());
 
   // Create gravity and calibration nodes and insert them
@@ -403,7 +259,7 @@ void ViconGraphSolver::build_problem(bool init_states) {
     Eigen::Vector3d rpy = rot2rpy(init_R_GtoV);
     values.insert(G(0), RotationXY(rpy(0), rpy(1)));
   }
-  ROS_INFO("[BUILD]: initial R_GtoV roll pitch %.4f, %.4f", values.at<RotationXY>(G(0)).thetax(), values.at<RotationXY>(G(0)).thetay());
+  printf("[BUILD]: initial R_GtoV roll pitch %.4f, %.4f\n", values.at<RotationXY>(G(0)).thetax(), values.at<RotationXY>(G(0)).thetay());
 
   // If estimating the timeoffset logic
   if (init_states) {
@@ -416,16 +272,13 @@ void ViconGraphSolver::build_problem(bool init_states) {
   // sigma(0,0) = 0.02; // seconds
   // PriorFactor<Vector1> factor_timemag(T(0), values.at<Vector1>(T(0)), sigma);
   // graph->add(factor_timemag);
-  ROS_INFO("[BUILD]: current time offset is %.4f", values.at<Vector1>(T(0))(0));
+  printf("[BUILD]: current time offset is %.4f\n", values.at<Vector1>(T(0))(0));
 
   // Loop through each camera time and construct the graph
   auto it1 = timestamp_cameras.begin();
   while (it1 != timestamp_cameras.end()) {
 
     // If ros is wants us to stop, break out
-    if (!ros::ok())
-      break;
-
     // Current image time
     double timestamp_inI = *it1;
     double time_from_start = timestamp_inI - timestamp_cameras.at(0);
@@ -441,7 +294,7 @@ void ViconGraphSolver::build_problem(bool init_states) {
 
     // Skip if we don't have a vicon measurement for this pose
     if (!has_vicon1 || !has_vicon2 || !has_vicon3) {
-      ROS_WARN("    - skipping camera time %.9f - %.2f from beginning (no vicon pose found)", timestamp_inI, time_from_start);
+      printf("[WARN]: skipping camera time %.9f - %.2f from beginning (no vicon pose found)\n", timestamp_inI, time_from_start);
       if (values.find(X(map_states[timestamp_inI])) != values.end()) {
         values.erase(X(map_states[timestamp_inI]));
       }
@@ -451,8 +304,8 @@ void ViconGraphSolver::build_problem(bool init_states) {
 
     // Check if we can do the inverse
     if (std::isnan(R_vicon.norm()) || std::isnan(R_vicon.inverse().norm())) {
-      ROS_WARN("    - skipping camera time %.9f - %.2f from beginning (R.norm = %.3f | Rinv.norm = %.3f)", timestamp_inI, time_from_start,
-               R_vicon.norm(), R_vicon.inverse().norm());
+      printf("[WARN]: skipping camera time %.9f - %.2f from beginning (R.norm = %.3f | Rinv.norm = %.3f)\n", timestamp_inI, time_from_start,
+             R_vicon.norm(), R_vicon.inverse().norm());
       if (values.find(X(map_states[timestamp_inI])) != values.end()) {
         values.erase(X(map_states[timestamp_inI]));
       }
@@ -506,9 +359,7 @@ void ViconGraphSolver::build_problem(bool init_states) {
     CpiV1 preint(0, 0, 0, 0, true);
     bool has_imu = propagator->propagate(time0, time1, bg, ba, preint);
     if (!has_imu || preint.DT != (time1 - time0)) {
-      ROS_ERROR("unable to get IMU readings, invalid preint\n");
-      ROS_ERROR("preint.DT = %.3f | (time1-time0) = %.3f\n", preint.DT, time1 - time0);
-      std::exit(EXIT_FAILURE);
+      throw std::runtime_error("unable to get IMU readings for preintegration");
     }
 
     // cout << "dt = " << preint.DT << " | dt_times = " << time1-time0 << endl;
@@ -518,9 +369,7 @@ void ViconGraphSolver::build_problem(bool init_states) {
 
     // Check if we can do the inverse
     if (std::isnan(preint.P_meas.norm()) || std::isnan(preint.P_meas.inverse().norm())) {
-      ROS_ERROR("R_imu is NAN | R.norm = %.3f | Rinv.norm = %.3f\n", preint.P_meas.norm(), preint.P_meas.inverse().norm());
-      ROS_ERROR("THIS SHOULD NEVER HAPPEN!@#!@#!@#!@#!#@\n");
-      std::exit(EXIT_FAILURE);
+      throw std::runtime_error("IMU preintegration covariance became NaN");
     }
 
     // Now create the IMU factor
@@ -538,8 +387,8 @@ void ViconGraphSolver::build_problem(bool init_states) {
 void ViconGraphSolver::optimize_problem() {
 
   // Debug
-  ROS_INFO("[VICON-GRAPH]: graph factors - %d", (int)graph->nrFactors());
-  ROS_INFO("[VICON-GRAPH]: graph nodes - %d", (int)graph->keys().size());
+  cout << "[VICON-GRAPH]: graph factors - " << (int)graph->nrFactors() << endl;
+  cout << "[VICON-GRAPH]: graph nodes - " << (int)graph->keys().size() << endl;
 
   // Setup the optimizer (levenberg)
   // Use METIS ordering to fix memory issue for large number of nodes
@@ -563,8 +412,8 @@ void ViconGraphSolver::optimize_problem() {
   // DoglegOptimizer optimizer(*graph, values, params);
 
   // Perform the optimization
-  ROS_INFO("[VICON-GRAPH]: begin optimization");
+  cout << "[VICON-GRAPH]: begin optimization" << endl;
   values_result = optimizer.optimize();
-  ROS_INFO("[VICON-GRAPH]: done optimization (%d iterations)!", (int)optimizer.iterations());
+  cout << "[VICON-GRAPH]: done optimization (" << (int)optimizer.iterations() << " iterations)!" << endl;
   rT3 = boost::posix_time::microsec_clock::local_time();
 }

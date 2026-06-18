@@ -21,10 +21,9 @@
 
 #include <Eigen/Eigen>
 #include <fstream>
-#include <geometry_msgs/PoseArray.h>
-#include <geometry_msgs/PoseStamped.h>
-#include <nav_msgs/Path.h>
-#include <ros/ros.h>
+#include <map>
+#include <memory>
+#include <string>
 #include <vector>
 
 #include <gtsam/inference/Symbol.h>
@@ -61,14 +60,28 @@ using gtsam::symbol_shorthand::X; // X: our JPL states
 class ViconGraphSolver {
 
 public:
+  struct Options {
+    Eigen::Matrix3d init_R_GtoV = Eigen::Matrix3d::Identity();
+    Eigen::Matrix3d init_R_BtoI = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d init_p_BinI = Eigen::Vector3d::Zero();
+    double init_toff_imu_to_vicon = 0.0;
+    double gravity_magnitude = 9.81;
+    int num_loop_relin = 0;
+    GtsamConfig gtsam_config;
+  };
+
+  struct ExportOptions {
+    bool overwrite_existing = true;
+  };
+
   /**
    * @brief Default constructor for the solver
-   * @param nh ROS node handler we will load parameters from
+   * @param options Solver configuration and initial values
    * @param propagator Propagator with all IMU measurements inside
    * @param interpolator Interpolator with all vicon poses inside
    * @param timestamp_cameras Timestamps we are interested in estimating
    */
-  ViconGraphSolver(ros::NodeHandle &nh, std::shared_ptr<Propagator> propagator, std::shared_ptr<Interpolator> interpolator,
+  ViconGraphSolver(const Options &options, std::shared_ptr<Propagator> propagator, std::shared_ptr<Interpolator> interpolator,
                    std::vector<double> timestamp_cameras);
 
   /**
@@ -87,6 +100,15 @@ public:
    * @param infofilepath Txt file we will save the found calibration parameters
    */
   void write_to_file(std::string csvfilepath, std::string infofilepath);
+
+  /**
+   * @brief Will export the graph to csv file (will be in eth format).
+   *
+   * @param csvfilepath CSV export file we want to save
+   * @param infofilepath Txt file we will save the found calibration parameters
+   * @param options Export behavior flags
+   */
+  void write_to_file(std::string csvfilepath, std::string infofilepath, const ExportOptions &options);
 
   /**
    * @brief Will publish the trajectories onto ROS for visualization in RVIZ
@@ -126,11 +148,6 @@ protected:
 
   // Timing variables
   boost::posix_time::ptime rT1, rT2, rT3, rT4, rT5, rT6, rT7;
-
-  // ROS node handler
-  ros::NodeHandle nh;
-  ros::Publisher pub_pathimu, pub_pathvicon, pub_vicon_raw;
-  double vicon_raw_pub_freq;
 
   // Measurement data from the rosbag
   std::shared_ptr<Propagator> propagator;

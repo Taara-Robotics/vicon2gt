@@ -3,20 +3,11 @@ cmake_minimum_required(VERSION 2.8.8)
 # Project name
 project(vicon2gt)
 
-# Find catkin (the ROS build system)
-find_package(catkin REQUIRED COMPONENTS roscpp rosbag geometry_msgs sensor_msgs nav_msgs)
-
 # Include libraries
 find_package(Eigen3 REQUIRED) # built gtsam with cmake -DGTSAM_USE_SYSTEM_EIGEN=ON ..
 find_package(Boost REQUIRED COMPONENTS system filesystem thread date_time serialization regex timer)
 find_package(GTSAM REQUIRED) # built gtsam with cmake -DGTSAM_USE_SYSTEM_EIGEN=ON ..
 set(GTSAM_LIBRARIES gtsam)
-
-# Describe catkin project
-catkin_package(
-    CATKIN_DEPENDS roscpp rosbag geometry_msgs sensor_msgs nav_msgs
-    INCLUDE_DIRS src
-)
 
 # Try to compile with c++11
 # http://stackoverflow.com/a/25836953
@@ -41,22 +32,16 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g3 -Wall")
 # Include our header files
 include_directories(
     src
+    ${EIGEN3_INCLUDE_DIRS}
     ${EIGEN3_INCLUDE_DIR}
     ${Boost_INCLUDE_DIRS}
-    ${PCL_INCLUDE_DIRS}
-    ${MLK_INCLUDE_DIRS}
     ${GTSAM_INCLUDE_DIR}
-    ${catkin_INCLUDE_DIRS}
 )
 
-# Set link libraries used by all binaries
+# Set link libraries used by the core library
 list(APPEND thirdparty_libraries
     ${Boost_LIBRARIES}
-    ${OpenCV_LIBRARIES}
-    ${PCL_LIBRARIES}
-    ${MKL_LIBRARIES}
     ${GTSAM_LIBRARIES}
-    ${catkin_LIBRARIES}
 )
 
 
@@ -82,11 +67,10 @@ target_include_directories(vicon2gt_lib PUBLIC src)
 ##################################################
 # Make binary files!
 ##################################################
-add_executable(estimate_vicon2gt src/estimate_vicon2gt.cpp)
-target_link_libraries(estimate_vicon2gt vicon2gt_lib ${thirdparty_libraries})
-
-add_executable(run_simulation src/run_simulation.cpp)
-target_link_libraries(run_simulation vicon2gt_lib ${thirdparty_libraries})
+find_package(OpenCV REQUIRED COMPONENTS core imgcodecs imgproc)
+add_executable(estimate_vicon2gt_csv src/estimate_vicon2gt_csv.cpp)
+target_compile_features(estimate_vicon2gt_csv PRIVATE cxx_std_17)
+target_link_libraries(estimate_vicon2gt_csv vicon2gt_lib ${OpenCV_LIBRARIES})
 
 
 

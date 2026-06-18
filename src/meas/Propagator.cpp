@@ -131,11 +131,6 @@ bool Propagator::propagate(double time0, double time1, Eigen::Vector3d bg_lin, E
     return false;
   }
 
-  // Debug
-  // ROS_INFO("end_prop - start_prop %.3f",prop_data.at(prop_data.size()-1).timestamp-prop_data.at(0).timestamp);
-  // ROS_INFO("imu_data_last - state %.3f",imu_data.at(imu_data.size()-1).timestamp-time0);
-  // ROS_INFO("update_time - state %.3f",time1-time0);
-
   //===================================================================================
   //===================================================================================
   //===================================================================================
