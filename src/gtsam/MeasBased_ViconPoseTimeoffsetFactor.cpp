@@ -51,6 +51,20 @@ gtsam::Vector MeasBased_ViconPoseTimeoffsetFactor::evaluateError(const JPLNavSta
   Eigen::Matrix<double, 6, 1> H_toff;
   bool has_vicon = m_interpolator->get_pose_with_jacobian(timestamp_inI - t_off(0), q_interp, p_interp, R_interp, H_toff);
 
+  // FIX(vicon2gt-nan): if the interpolator could not produce a vicon pose for
+  // this state (no bracketing samples within 0.1 s), this factor carries NO
+  // information -- as the interpolator comment intends. Historically the code
+  // computed the error from uninitialized q/p/R anyway (garbage -> NaN), which
+  // NaN'd the LM gradient and froze the optimizer at 0 iterations. Return a
+  // true no-op factor instead: zero error and zero Jacobians.
+  if (!has_vicon) {
+    if (H1) { *H1 = gtsam::Matrix::Zero(6, 15); }
+    if (H2) { *H2 = gtsam::Matrix::Zero(6, 3); }
+    if (H3) { *H3 = gtsam::Matrix::Zero(6, 3); }
+    if (H4) { *H4 = gtsam::Matrix::Zero(6, 1); }
+    return Vector6::Zero();
+  }
+
   // Find the sqrt inverse to whittening
   // This is because our measurement noise can change every iteration based on interpolation
   Eigen::Matrix<double, 6, 6> sqrt_inv_interp = R_interp.llt().matrixL();
